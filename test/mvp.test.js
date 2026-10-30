@@ -1,0 +1,23 @@
+const {test,after}=require('node:test');
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const os=require('node:os');
+const path=require('node:path');
+const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'impulsoweb-'));
+process.env.DATA_FILE=path.join(tmp,'db.json');
+process.env.ADMIN_EMAIL='admin@teste.com';
+process.env.ADMIN_PASSWORD='senha-segura-para-testes-123';
+const {server}=require('../server');
+let base,cookie,leadId,taskId;
+after(()=>{server.close();fs.rmSync(tmp,{recursive:true,force:true});});
+async function request(url,method='GET',body,authenticated=false){const headers={'Content-Type':'application/json'};if(authenticated)headers.Cookie=cookie;return fetch(base+url,{method,headers,...(body?{body:JSON.stringify(body)}:{})});}
+test('inicia servidor HTTP',async()=>{await new Promise(r=>server.listen(0,'127.0.0.1',r));base='http://127.0.0.1:'+server.address().port;const r=await request('/api/health');assert.equal(r.status,200);});
+test('recusa lead inválido',async()=>{const r=await request('/api/leads','POST',{name:'A'});assert.equal(r.status,422);});
+test('cria lead válido',async()=>{const r=await request('/api/leads','POST',{name:'Ana Souza',email:'ana@exemplo.com',phone:'81999999999',business:'Ateliê Ana',service:'Landing page',budget:'Até R$ 1.000',consent:true,notes:'Preciso de uma página'});assert.equal(r.status,201);leadId=(await r.json()).id;assert.ok(leadId);});
+test('bloqueia dados administrativos sem login',async()=>{const r=await request('/api/admin/overview');assert.equal(r.status,401);const p=await request('/admin.html');assert.equal(p.url,base+'/index.html');});
+test('recusa login incorreto',async()=>{const r=await request('/api/login','POST',{email:'admin@teste.com',password:'errada'});assert.equal(r.status,401);});
+test('autentica administrador',async()=>{const r=await request('/api/login','POST',{email:'admin@teste.com',password:'senha-segura-para-testes-123'});assert.equal(r.status,200);cookie=r.headers.get('set-cookie').split(';')[0];assert.ok(cookie.startsWith('session='));});
+test('consulta lead e altera status e cliente',async()=>{let r=await request('/api/admin/overview','GET',undefined,true);let d=await r.json();assert.equal(d.leads.length,1);assert.equal(d.leads[0].name,'Ana Souza');r=await request('/api/admin/leads/'+leadId,'PATCH',{status:'Fechado',customer:true,projectStatus:'Em desenvolvimento'},true);assert.equal(r.status,200);d=await r.json();assert.equal(d.lead.customer,true);assert.equal(d.lead.projectStatus,'Em desenvolvimento');});
+test('adiciona e finaliza lembrete',async()=>{let r=await request('/api/admin/tasks','POST',{title:'Responder orçamento',dueDate:'2026-11-03'},true);assert.equal(r.status,201);taskId=(await r.json()).task.id;r=await request('/api/admin/tasks/'+taskId,'PATCH',{done:true},true);assert.equal((await r.json()).task.done,true);});
+test('dados persistem em arquivo',()=>{const d=JSON.parse(fs.readFileSync(process.env.DATA_FILE));assert.equal(d.leads[0].status,'Fechado');assert.equal(d.tasks[0].done,true);});
+test('logout encerra acesso',async()=>{const r=await request('/api/logout','POST',undefined,true);assert.equal(r.status,200);const blocked=await request('/api/admin/overview','GET',undefined,true);assert.equal(blocked.status,401);});
